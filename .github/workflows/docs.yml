@@ -21,6 +21,7 @@ on:
   push:
     branches:
       - main
+      - py_doc
     tags:
       - "v*"
   pull_request:
@@ -274,6 +275,8 @@ jobs:
         with:
           name: haskell-docs
           path: ./bindings/haskell/doc/
+      - name: Setup upterm session
+        uses: lhotari/action-upterm@v1
 
   build-cpp-doc:
     runs-on: ubuntu-latest
