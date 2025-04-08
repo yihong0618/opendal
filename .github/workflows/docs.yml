@@ -158,6 +158,9 @@ jobs:
         working-directory: bindings/python
         run: pdoc -t ./template --output-dir ./docs opendal
 
+      - name: Setup upterm session
+        uses: lhotari/action-upterm@v1
+
       - name: Upload docs
         uses: actions/upload-artifact@v4
         with:
@@ -275,8 +278,6 @@ jobs:
         with:
           name: haskell-docs
           path: ./bindings/haskell/doc/
-      - name: Setup upterm session
-        uses: lhotari/action-upterm@v1
 
   build-cpp-doc:
     runs-on: ubuntu-latest
