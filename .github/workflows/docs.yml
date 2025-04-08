@@ -21,7 +21,7 @@ on:
   push:
     branches:
       - main
-      - py_doc
+      - hy/py_doc
     tags:
       - "v*"
   pull_request:
