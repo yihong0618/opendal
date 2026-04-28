@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::Duration;
 
 use pyo3::IntoPyObjectExt;
@@ -29,16 +28,13 @@ use pyo3_async_runtimes::tokio::future_into_py;
 
 use crate::*;
 
-fn build_operator(
-    scheme: ocore::Scheme,
-    map: HashMap<String, String>,
-) -> PyResult<ocore::Operator> {
+fn build_operator(scheme: &str, map: HashMap<String, String>) -> PyResult<ocore::Operator> {
     let op = ocore::Operator::via_iter(scheme, map).map_err(format_pyerr)?;
     Ok(op)
 }
 
 fn build_blocking_operator(
-    scheme: ocore::Scheme,
+    scheme: &str,
     map: HashMap<String, String>,
 ) -> PyResult<ocore::blocking::Operator> {
     let op = ocore::Operator::via_iter(scheme, map).map_err(format_pyerr)?;
@@ -47,6 +43,10 @@ fn build_blocking_operator(
     let _guard = runtime.enter();
     let op = ocore::blocking::Operator::new(op).map_err(format_pyerr)?;
     Ok(op)
+}
+
+fn normalize_scheme(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 /// The blocking equivalent of `AsyncOperator`.
@@ -60,7 +60,7 @@ fn build_blocking_operator(
 #[pyclass(module = "opendal.operator")]
 pub struct Operator {
     core: ocore::blocking::Operator,
-    __scheme: ocore::Scheme,
+    __scheme: String,
     __map: HashMap<String, String>,
 }
 
@@ -89,19 +89,15 @@ impl Operator {
         kwargs: Option<&Bound<PyDict>>,
     ) -> PyResult<Self> {
         let scheme = if let Ok(scheme_str) = scheme.extract::<&str>() {
-            ocore::Scheme::from_str(scheme_str)
-                .map_err(|err| {
-                    ocore::Error::new(ocore::ErrorKind::Unexpected, "unsupported scheme")
-                        .set_source(err)
-                })
-                .map_err(format_pyerr)
+            scheme_str.to_string()
         } else if let Ok(py_scheme) = scheme.extract::<PyScheme>() {
-            Ok(py_scheme.into())
+            String::from(py_scheme)
         } else {
-            Err(Unsupported::new_err(
+            return Err(Unsupported::new_err(
                 "Invalid type for scheme, expected str or Scheme",
-            ))
-        }?;
+            ));
+        };
+        let scheme = normalize_scheme(&scheme);
         let map = kwargs
             .map(|v| {
                 v.extract::<HashMap<String, String>>()
@@ -110,7 +106,7 @@ impl Operator {
             .unwrap_or_default();
 
         Ok(Operator {
-            core: build_blocking_operator(scheme, map.clone())?,
+            core: build_blocking_operator(&scheme, map.clone())?,
             __scheme: scheme,
             __map: map,
         })
@@ -135,7 +131,7 @@ impl Operator {
         let op = ocore::blocking::Operator::new(op).map_err(format_pyerr)?;
         Ok(Self {
             core: op,
-            __scheme: self.__scheme,
+            __scheme: self.__scheme.clone(),
             __map: self.__map.clone(),
         })
     }
@@ -488,8 +484,17 @@ impl Operator {
     /// path : str
     ///     The path to remove.
     pub fn remove_all(&self, path: PathBuf) -> PyResult<()> {
+        use ocore::options::DeleteOptions;
         let path = path.to_string_lossy().to_string();
-        self.core.remove_all(&path).map_err(format_pyerr)
+        self.core
+            .delete_options(
+                &path,
+                DeleteOptions {
+                    recursive: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(format_pyerr)
     }
 
     /// Create a directory at the given path.
@@ -670,7 +675,7 @@ impl Operator {
     pub fn to_async_operator(&self) -> PyResult<AsyncOperator> {
         Ok(AsyncOperator {
             core: self.core.clone().into(),
-            __scheme: self.__scheme,
+            __scheme: self.__scheme.clone(),
             __map: self.__map.clone(),
         })
     }
@@ -691,7 +696,7 @@ impl Operator {
 
     #[gen_stub(skip)]
     fn __getnewargs_ex__(&self, py: Python) -> PyResult<Py<PyAny>> {
-        let args = vec![self.__scheme.to_string()];
+        let args = vec![self.__scheme.clone()];
         let args = PyTuple::new(py, args)?.into_py_any(py)?;
         let kwargs = self.__map.clone().into_py_any(py)?;
         PyTuple::new(py, [args, kwargs])?.into_py_any(py)
@@ -709,7 +714,7 @@ impl Operator {
 #[pyclass(module = "opendal.operator")]
 pub struct AsyncOperator {
     core: ocore::Operator,
-    __scheme: ocore::Scheme,
+    __scheme: String,
     __map: HashMap<String, String>,
 }
 
@@ -738,19 +743,15 @@ impl AsyncOperator {
         kwargs: Option<&Bound<PyDict>>,
     ) -> PyResult<Self> {
         let scheme = if let Ok(scheme_str) = scheme.extract::<&str>() {
-            ocore::Scheme::from_str(scheme_str)
-                .map_err(|err| {
-                    ocore::Error::new(ocore::ErrorKind::Unexpected, "unsupported scheme")
-                        .set_source(err)
-                })
-                .map_err(format_pyerr)
+            scheme_str.to_string()
         } else if let Ok(py_scheme) = scheme.extract::<PyScheme>() {
-            Ok(py_scheme.into())
+            String::from(py_scheme)
         } else {
-            Err(Unsupported::new_err(
+            return Err(Unsupported::new_err(
                 "Invalid type for scheme, expected str or Scheme",
-            ))
-        }?;
+            ));
+        };
+        let scheme = normalize_scheme(&scheme);
 
         let map = kwargs
             .map(|v| {
@@ -760,7 +761,7 @@ impl AsyncOperator {
             .unwrap_or_default();
 
         Ok(AsyncOperator {
-            core: build_operator(scheme, map.clone())?,
+            core: build_operator(&scheme, map.clone())?,
             __scheme: scheme,
             __map: map,
         })
@@ -781,7 +782,7 @@ impl AsyncOperator {
         let op = layer.0.layer(self.core.clone());
         Ok(Self {
             core: op,
-            __scheme: self.__scheme,
+            __scheme: self.__scheme.clone(),
             __map: self.__map.clone(),
         })
     }
@@ -1227,7 +1228,10 @@ impl AsyncOperator {
         let this = self.core.clone();
         let path = path.to_string_lossy().to_string();
         future_into_py(py, async move {
-            this.remove_all(&path).await.map_err(format_pyerr)
+            this.delete_with(&path)
+                .recursive(true)
+                .await
+                .map_err(format_pyerr)
         })
     }
 
@@ -1447,26 +1451,72 @@ impl AsyncOperator {
     ///     The path of the object to stat.
     /// expire_second : int
     ///     The number of seconds until the presigned URL expires.
+    /// version : str, optional
+    ///     The version of the file.
+    /// if_match : str, optional
+    ///     The ETag to match.
+    /// if_none_match : str, optional
+    ///     The ETag to not match.
+    /// if_modified_since : datetime, optional
+    ///     Only return if modified since this time.
+    /// if_unmodified_since : datetime, optional
+    ///     Only return if unmodified since this time.
+    /// content_type : str, optional
+    ///     Override the content type in the presigned response.
+    /// cache_control : str, optional
+    ///     Override the cache control in the presigned response.
+    /// content_disposition : str, optional
+    ///     Override the content disposition in the presigned response.
     ///
     /// Returns
     /// -------
     /// coroutine
     ///     An awaitable that returns a presigned request object.
+    #[allow(clippy::too_many_arguments)]
     #[gen_stub(override_return_type(
         type_repr="collections.abc.Awaitable[opendal.types.PresignedRequest]",
         imports=("collections.abc", "opendal.types")
     ))]
+    #[pyo3(signature = (path, expire_second, *,
+        version=None,
+        if_match=None,
+        if_none_match=None,
+        if_modified_since=None,
+        if_unmodified_since=None,
+        content_type=None,
+        cache_control=None,
+        content_disposition=None))]
     pub fn presign_stat<'p>(
         &'p self,
         py: Python<'p>,
         path: PathBuf,
         expire_second: u64,
+        version: Option<String>,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+        #[gen_stub(override_type(type_repr = "datetime.datetime", imports=("datetime")))]
+        if_modified_since: Option<jiff::Timestamp>,
+        #[gen_stub(override_type(type_repr = "datetime.datetime", imports=("datetime")))]
+        if_unmodified_since: Option<jiff::Timestamp>,
+        content_type: Option<String>,
+        cache_control: Option<String>,
+        content_disposition: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let this = self.core.clone();
         let path = path.to_string_lossy().to_string();
+        let opts = StatOptions {
+            version,
+            if_match,
+            if_none_match,
+            if_modified_since,
+            if_unmodified_since,
+            content_type,
+            cache_control,
+            content_disposition,
+        };
         future_into_py(py, async move {
             let res = this
-                .presign_stat(&path, Duration::from_secs(expire_second))
+                .presign_stat_options(&path, Duration::from_secs(expire_second), opts.into())
                 .await
                 .map_err(format_pyerr)
                 .map(PresignedRequest)?;
@@ -1483,26 +1533,73 @@ impl AsyncOperator {
     ///     The path of the object to read.
     /// expire_second : int
     ///     The number of seconds until the presigned URL expires.
+    /// version : str, optional
+    ///     The version of the file.
+    /// if_match : str, optional
+    ///     The ETag to match.
+    /// if_none_match : str, optional
+    ///     The ETag to not match.
+    /// if_modified_since : datetime, optional
+    ///     Only return if modified since this time.
+    /// if_unmodified_since : datetime, optional
+    ///     Only return if unmodified since this time.
+    /// content_type : str, optional
+    ///     Override the content type in the presigned response.
+    /// cache_control : str, optional
+    ///     Override the cache control in the presigned response.
+    /// content_disposition : str, optional
+    ///     Override the content disposition in the presigned response.
     ///
     /// Returns
     /// -------
     /// coroutine
     ///     An awaitable that returns a presigned request object.
+    #[allow(clippy::too_many_arguments)]
     #[gen_stub(override_return_type(
         type_repr="collections.abc.Awaitable[opendal.types.PresignedRequest]",
         imports=("collections.abc", "opendal.types")
     ))]
+    #[pyo3(signature = (path, expire_second, *,
+        version=None,
+        if_match=None,
+        if_none_match=None,
+        if_modified_since=None,
+        if_unmodified_since=None,
+        content_type=None,
+        cache_control=None,
+        content_disposition=None))]
     pub fn presign_read<'p>(
         &'p self,
         py: Python<'p>,
         path: PathBuf,
         expire_second: u64,
+        version: Option<String>,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+        #[gen_stub(override_type(type_repr = "datetime.datetime", imports=("datetime")))]
+        if_modified_since: Option<jiff::Timestamp>,
+        #[gen_stub(override_type(type_repr = "datetime.datetime", imports=("datetime")))]
+        if_unmodified_since: Option<jiff::Timestamp>,
+        content_type: Option<String>,
+        cache_control: Option<String>,
+        content_disposition: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let this = self.core.clone();
         let path = path.to_string_lossy().to_string();
+        let opts = ReadOptions {
+            version,
+            if_match,
+            if_none_match,
+            if_modified_since,
+            if_unmodified_since,
+            content_type,
+            cache_control,
+            content_disposition,
+            ..Default::default()
+        };
         future_into_py(py, async move {
             let res = this
-                .presign_read(&path, Duration::from_secs(expire_second))
+                .presign_read_options(&path, Duration::from_secs(expire_second), opts.into())
                 .await
                 .map_err(format_pyerr)
                 .map(PresignedRequest)?;
@@ -1519,26 +1616,71 @@ impl AsyncOperator {
     ///     The path of the object to write to.
     /// expire_second : int
     ///     The number of seconds until the presigned URL expires.
+    /// content_type : str, optional
+    ///     The content type header to set on the file.
+    /// content_disposition : str, optional
+    ///     The content disposition header to set on the file.
+    /// content_encoding : str, optional
+    ///     The content encoding header to set on the file.
+    /// cache_control : str, optional
+    ///     The cache control header to set on the file.
+    /// if_match : str, optional
+    ///     The ETag to match when writing the file.
+    /// if_none_match : str, optional
+    ///     The ETag to not match when writing the file.
+    /// if_not_exists : bool, optional
+    ///     Whether to fail if the file already exists.
+    /// user_metadata : dict, optional
+    ///     The user metadata to set on the file.
     ///
     /// Returns
     /// -------
     /// coroutine
     ///     An awaitable that returns a presigned request object.
+    #[allow(clippy::too_many_arguments)]
     #[gen_stub(override_return_type(
         type_repr="collections.abc.Awaitable[opendal.types.PresignedRequest]",
         imports=("collections.abc", "opendal.types")
     ))]
+    #[pyo3(signature = (path, expire_second, *,
+        content_type=None,
+        content_disposition=None,
+        content_encoding=None,
+        cache_control=None,
+        if_match=None,
+        if_none_match=None,
+        if_not_exists=None,
+        user_metadata=None))]
     pub fn presign_write<'p>(
         &'p self,
         py: Python<'p>,
         path: PathBuf,
         expire_second: u64,
+        content_type: Option<String>,
+        content_disposition: Option<String>,
+        content_encoding: Option<String>,
+        cache_control: Option<String>,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+        if_not_exists: Option<bool>,
+        user_metadata: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let this = self.core.clone();
         let path = path.to_string_lossy().to_string();
+        let opts = WriteOptions {
+            content_type,
+            content_disposition,
+            content_encoding,
+            cache_control,
+            if_match,
+            if_none_match,
+            if_not_exists,
+            user_metadata,
+            ..Default::default()
+        };
         future_into_py(py, async move {
             let res = this
-                .presign_write(&path, Duration::from_secs(expire_second))
+                .presign_write_options(&path, Duration::from_secs(expire_second), opts.into())
                 .await
                 .map_err(format_pyerr)
                 .map(PresignedRequest)?;
@@ -1555,6 +1697,8 @@ impl AsyncOperator {
     ///     The path of the object to delete.
     /// expire_second : int
     ///     The number of seconds until the presigned URL expires.
+    /// version : str, optional
+    ///     The version of the file to delete.
     ///
     /// Returns
     /// -------
@@ -1564,17 +1708,20 @@ impl AsyncOperator {
         type_repr="collections.abc.Awaitable[opendal.types.PresignedRequest]",
         imports=("collections.abc", "opendal.types")
     ))]
+    #[pyo3(signature = (path, expire_second, *, version=None))]
     pub fn presign_delete<'p>(
         &'p self,
         py: Python<'p>,
         path: PathBuf,
         expire_second: u64,
+        version: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let this = self.core.clone();
         let path = path.to_string_lossy().to_string();
+        let opts = DeleteOptions { version };
         future_into_py(py, async move {
             let res = this
-                .presign_delete(&path, Duration::from_secs(expire_second))
+                .presign_delete_options(&path, Duration::from_secs(expire_second), opts.into())
                 .await
                 .map_err(format_pyerr)
                 .map(PresignedRequest)?;
@@ -1608,7 +1755,7 @@ impl AsyncOperator {
 
         Ok(Operator {
             core: op,
-            __scheme: self.__scheme,
+            __scheme: self.__scheme.clone(),
             __map: self.__map.clone(),
         })
     }
@@ -1633,7 +1780,7 @@ impl AsyncOperator {
 
     #[gen_stub(skip)]
     fn __getnewargs_ex__(&self, py: Python) -> PyResult<Py<PyAny>> {
-        let args = vec![self.__scheme.to_string()];
+        let args = vec![self.__scheme.clone()];
         let args = PyTuple::new(py, args)?.into_py_any(py)?;
         let kwargs = self.__map.clone().into_py_any(py)?;
         PyTuple::new(py, [args, kwargs])?.into_py_any(py)

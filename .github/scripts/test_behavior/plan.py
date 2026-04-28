@@ -31,11 +31,17 @@ GITHUB_DIR = SCRIPT_PATH.parent.parent
 # The project dir for opendal.
 PROJECT_DIR = GITHUB_DIR.parent
 
-LANGUAGE_BINDING = ["java", "python", "nodejs", "go", "c", "cpp"]
-
-BIN = []
+LANGUAGE_BINDING = ["java", "python", "nodejs", "go", "c", "cpp", "dotnet"]
 
 INTEGRATIONS = ["object_store"]
+
+TEMPORARILY_DISABLED_CORE_SERVICES = {
+    # FIXME: Re-enable gdrive behavior tests after #7384 is fixed.
+    # Gdrive is currently not reliable enough for CI: #6684 tracks missing
+    # freshly-created entries in listings, and existing behavior tests already
+    # document redirect loops caused by Google Drive abuse detection.
+    "gdrive",
+}
 
 
 def provided_cases() -> list[dict[str, str]]:
@@ -60,6 +66,10 @@ def provided_cases() -> list[dict[str, str]]:
     # We will check if pattern `op://services` exist in content.
     if not os.getenv("GITHUB_HAS_SECRETS") == "true":
         cases[:] = [v for v in cases if "op://services" not in v["content"]]
+
+    cases[:] = [
+        v for v in cases if v["service"] not in TEMPORARILY_DISABLED_CORE_SERVICES
+    ]
 
     # Remove content from cases.
     cases = [
@@ -92,8 +102,8 @@ class Hint:
     binding_c: bool = field(default=False, init=False)
     # Is binding cpp affected?
     binding_cpp: bool = field(default=False, init=False)
-    # Is bin ofs affected?
-    bin_ofs: bool = field(default=False, init=False)
+    # Is binding dotnet affected?
+    binding_dotnet: bool = field(default=False, init=False)
     # Is integration object_store affected ?
     integration_object_store: bool = field(default=False, init=False)
 
@@ -108,6 +118,17 @@ def calculate_hint(changed_files: list[str]) -> Hint:
 
     # Remove all files that end with `.md`
     changed_files = [f for f in changed_files if not f.endswith(".md")]
+
+    def mark_service_affected(service: str) -> None:
+        hint.core = True
+        for language in LANGUAGE_BINDING:
+            setattr(hint, f"binding_{language}", True)
+        for integration in INTEGRATIONS:
+            setattr(hint, f"integration_{integration}", True)
+
+        hint.services.add(service)
+        hint.services.add(service.replace("-", "_"))
+        hint.services.add(service.replace("_", "-"))
 
     for p in changed_files:
         # workflow behavior tests affected
@@ -128,11 +149,6 @@ def calculate_hint(changed_files: list[str]) -> Hint:
                 setattr(hint, f"binding_{language}", True)
                 hint.all_service = True
 
-        for bin in BIN:
-            if p == f".github/workflows/test_behavior_bin_{bin}.yml":
-                setattr(hint, f"bin_{bin}", True)
-                hint.all_service = True
-
         for integration in INTEGRATIONS:
             if p == f".github/workflows/test_behavior_integration_{integration}.yml":
                 setattr(hint, f"integration_{integration}", True)
@@ -145,16 +161,14 @@ def calculate_hint(changed_files: list[str]) -> Hint:
             and not p.startswith("core/edge/")
             and not p.startswith("core/fuzz/")
             and not p.startswith("core/src/services/")
+            and not p.startswith("core/core/src/services/")
+            and not p.startswith("core/services/")
             and not p.startswith("core/src/docs/")
+            and not p.startswith("core/core/src/docs/")
         ):
             hint.core = True
-            hint.binding_java = True
-            hint.binding_python = True
-            hint.binding_nodejs = True
-            hint.binding_go = True
-            hint.binding_c = True
-            hint.binding_cpp = True
-            hint.bin_ofs = True
+            for language in LANGUAGE_BINDING:
+                setattr(hint, f"binding_{language}", True)
             for integration in INTEGRATIONS:
                 setattr(hint, f"integration_{integration}", True)
             hint.all_service = True
@@ -171,7 +185,7 @@ def calculate_hint(changed_files: list[str]) -> Hint:
             hint.binding_go = True
             hint.all_service = True
 
-        # cpp affected  
+        # cpp affected
         if p.startswith("bindings/cpp/"):
             hint.binding_cpp = True
             hint.all_service = True
@@ -180,12 +194,6 @@ def calculate_hint(changed_files: list[str]) -> Hint:
         if p.startswith(".github/scripts/test_go_binding"):
             hint.binding_go = True
             hint.all_service = True
-
-        # bin affected
-        for bin in BIN:
-            if p.startswith(f"bin/{bin}"):
-                setattr(hint, f"bin_{bin}", True)
-                hint.all_service = True
 
         # integration affected
         for integration in INTEGRATIONS:
@@ -196,38 +204,27 @@ def calculate_hint(changed_files: list[str]) -> Hint:
         # core service affected
         match = re.search(r"core/src/services/([^/]+)/", p)
         if match:
-            hint.core = True
-            for language in LANGUAGE_BINDING:
-                setattr(hint, f"binding_{language}", True)
-            for bin in BIN:
-                setattr(hint, f"bin_{bin}", True)
-            for integration in INTEGRATIONS:
-                setattr(hint, f"integration_{integration}", True)
-            hint.services.add(match.group(1))
+            mark_service_affected(match.group(1))
+
+        # service crate affected
+        match = re.search(r"core/services/([^/]+)/", p)
+        if match:
+            mark_service_affected(match.group(1))
+
+        # opendal-core internal service affected
+        match = re.search(r"core/core/src/services/([^/]+)/", p)
+        if match:
+            mark_service_affected(match.group(1))
 
         # core test affected
         match = re.search(r".github/services/([^/]+)/", p)
         if match:
-            hint.core = True
-            for language in LANGUAGE_BINDING:
-                setattr(hint, f"binding_{language}", True)
-            for bin in BIN:
-                setattr(hint, f"bin_{bin}", True)
-            for integration in INTEGRATIONS:
-                setattr(hint, f"integration_{integration}", True)
-            hint.services.add(match.group(1))
+            mark_service_affected(match.group(1))
 
         # fixture affected
         match = re.search(r"fixtures/([^/]+)/", p)
         if match:
-            hint.core = True
-            for language in LANGUAGE_BINDING:
-                setattr(hint, f"binding_{language}", True)
-            for bin in BIN:
-                setattr(hint, f"bin_{bin}", True)
-            for integration in INTEGRATIONS:
-                setattr(hint, f"integration_{integration}", True)
-            hint.services.add(match.group(1))
+            mark_service_affected(match.group(1))
 
     return hint
 
@@ -280,9 +277,25 @@ def generate_language_binding_cases(
     # Bindings may be treated as parallel requests, so we need to disable it for all languages.
     cases = [v for v in cases if v["service"] != "aliyun_drive"]
 
-    # Remove hdfs cases for java and go.
+    # Remove invalid cases for java.
     if language == "java":
-        cases = [v for v in cases if v["service"] != "hdfs"]
+        cases = [v for v in cases if v["service"] not in [
+            "compfs",
+            # FIXME: Re-enable hf after https://github.com/apache/opendal/issues/7367 is fixed.
+            "hf",
+            "hdfs",
+            "hdfs_native",
+            "monoiofs",
+            "rocksdb",
+        ]]
+
+    # Remove invalid cases for dotnet.
+    if language == "dotnet":
+        cases = [v for v in cases if v["service"] not in [
+            "hdfs",
+            "hdfs_native",
+            "rocksdb",
+        ]]
 
     if os.getenv("GITHUB_IS_PUSH") == "true":
         return cases
@@ -297,29 +310,6 @@ def generate_language_binding_cases(
 
     # Filter all cases that not shown up in changed files
     cases = [v for v in cases if v["service"] in hint.services]
-    return cases
-
-
-def generate_bin_cases(
-    cases: list[dict[str, str]], hint: Hint, bin: str
-) -> list[dict[str, str]]:
-    # Return empty if this bin is False
-    if not getattr(hint, f"bin_{bin}"):
-        return []
-
-    cases = unique_cases(cases)
-
-    if bin == "ofs":
-        supported_services = ["fs", "s3"]
-        cases = [v for v in cases if v["service"] in supported_services]
-
-    # Return all services if all_service is True
-    if hint.all_service:
-        return cases
-
-    # Filter all cases that not shown up in changed files
-    cases = [v for v in cases if v["service"] in hint.services]
-
     return cases
 
 
@@ -400,14 +390,6 @@ def plan(changed_files: list[str]) -> dict[str, Any]:
                         ],
                     }
                 )
-
-    for bin in BIN:
-        jobs[f"bin_{bin}"] = []
-        jobs["components"][f"bin_{bin}"] = False
-        bin_cases = generate_bin_cases(cases, hint, bin)
-        if len(bin_cases) > 0:
-            jobs["components"][f"bin_{bin}"] = True
-            jobs[f"bin_{bin}"].append({"os": "ubuntu-latest", "cases": bin_cases})
 
     for integration in INTEGRATIONS:
         jobs[f"integration_{integration}"] = []

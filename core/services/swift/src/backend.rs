@@ -1,0 +1,350 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+use std::fmt::Debug;
+use std::sync::Arc;
+
+use http::Response;
+use http::StatusCode;
+use log::debug;
+
+use super::SWIFT_SCHEME;
+use super::SwiftConfig;
+use super::core::*;
+use super::deleter::SwiftDeleter;
+use super::error::parse_error;
+use super::lister::SwiftLister;
+use super::writer::SwiftWriter;
+use opendal_core::raw::*;
+use opendal_core::*;
+
+/// [OpenStack Swift](https://docs.openstack.org/api-ref/object-store/#)'s REST API support.
+/// For more information about swift-compatible services, refer to [Compatible Services](#compatible-services).
+#[doc = include_str!("docs.md")]
+#[doc = include_str!("compatible_services.md")]
+#[derive(Debug, Default)]
+pub struct SwiftBuilder {
+    pub(super) config: SwiftConfig,
+}
+
+impl SwiftBuilder {
+    /// Set the remote address of this backend
+    ///
+    /// Endpoints should be full uri, e.g.
+    ///
+    /// - `http://127.0.0.1:8080/v1/AUTH_test`
+    /// - `http://192.168.66.88:8080/swift/v1`
+    /// - `https://openstack-controller.example.com:8080/v1/ccount`
+    ///
+    /// If user inputs endpoint without scheme, we will
+    /// prepend `https://` to it.
+    pub fn endpoint(mut self, endpoint: &str) -> Self {
+        self.config.endpoint = if endpoint.is_empty() {
+            None
+        } else {
+            Some(endpoint.trim_end_matches('/').to_string())
+        };
+        self
+    }
+
+    /// Set container of this backend.
+    ///
+    /// All operations will happen under this container. It is required. e.g. `snapshots`
+    pub fn container(mut self, container: &str) -> Self {
+        self.config.container = if container.is_empty() {
+            None
+        } else {
+            Some(container.trim_end_matches('/').to_string())
+        };
+        self
+    }
+
+    /// Set root of this backend.
+    ///
+    /// All operations will happen under this root.
+    pub fn root(mut self, root: &str) -> Self {
+        self.config.root = if root.is_empty() {
+            None
+        } else {
+            Some(root.to_string())
+        };
+
+        self
+    }
+
+    /// Set the token of this backend.
+    ///
+    /// Default to empty string.
+    pub fn token(mut self, token: &str) -> Self {
+        if !token.is_empty() {
+            self.config.token = Some(token.to_string());
+        }
+        self
+    }
+
+    /// Set the TempURL key for generating presigned URLs.
+    ///
+    /// This should match the `X-Account-Meta-Temp-URL-Key` or
+    /// `X-Container-Meta-Temp-URL-Key` value configured on the Swift
+    /// account or container.
+    pub fn temp_url_key(mut self, key: &str) -> Self {
+        if !key.is_empty() {
+            self.config.temp_url_key = Some(key.to_string());
+        }
+        self
+    }
+
+    /// Set the hash algorithm for TempURL signing.
+    ///
+    /// Supported values: `sha1`, `sha256`, `sha512`. Defaults to `sha256`.
+    /// The cluster must have the chosen algorithm in its
+    /// `tempurl.allowed_digests` (check `GET /info`).
+    pub fn temp_url_hash_algorithm(mut self, algo: &str) -> Self {
+        if !algo.is_empty() {
+            self.config.temp_url_hash_algorithm = Some(algo.to_string());
+        }
+        self
+    }
+}
+
+impl Builder for SwiftBuilder {
+    type Config = SwiftConfig;
+
+    /// Build a SwiftBackend.
+    fn build(self) -> Result<impl Access> {
+        debug!("backend build started: {:?}", &self);
+
+        let root = normalize_root(&self.config.root.unwrap_or_default());
+        debug!("backend use root {root}");
+
+        let endpoint = match self.config.endpoint {
+            Some(endpoint) => {
+                if endpoint.starts_with("http") {
+                    endpoint
+                } else {
+                    format!("https://{endpoint}")
+                }
+            }
+            None => {
+                return Err(Error::new(
+                    ErrorKind::ConfigInvalid,
+                    "missing endpoint for Swift",
+                ));
+            }
+        };
+        debug!("backend use endpoint: {}", &endpoint);
+
+        let container = match self.config.container {
+            Some(container) => container,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::ConfigInvalid,
+                    "missing container for Swift",
+                ));
+            }
+        };
+
+        let token = self.config.token.unwrap_or_default();
+        let temp_url_key = self.config.temp_url_key.unwrap_or_default();
+        let has_temp_url_key = !temp_url_key.is_empty();
+        let temp_url_hash_algorithm = match &self.config.temp_url_hash_algorithm {
+            Some(algo) => TempUrlHashAlgorithm::from_str_opt(algo)?,
+            None => TempUrlHashAlgorithm::Sha256,
+        };
+
+        Ok(SwiftBackend {
+            core: Arc::new(SwiftCore {
+                info: {
+                    let am = AccessorInfo::default();
+                    am.set_scheme(SWIFT_SCHEME)
+                        .set_root(&root)
+                        .set_native_capability(Capability {
+                            stat: true,
+                            stat_with_if_match: true,
+                            stat_with_if_none_match: true,
+                            stat_with_if_modified_since: true,
+                            stat_with_if_unmodified_since: true,
+
+                            read: true,
+                            read_with_if_match: true,
+                            read_with_if_none_match: true,
+                            read_with_if_modified_since: true,
+                            read_with_if_unmodified_since: true,
+
+                            write: true,
+                            write_can_empty: true,
+                            write_can_multi: true,
+                            write_multi_min_size: Some(5 * 1024 * 1024),
+                            write_multi_max_size: if cfg!(target_pointer_width = "64") {
+                                Some(5 * 1024 * 1024 * 1024)
+                            } else {
+                                Some(usize::MAX)
+                            },
+                            write_with_content_type: true,
+                            write_with_content_disposition: true,
+                            write_with_content_encoding: true,
+                            write_with_cache_control: true,
+                            write_with_user_metadata: true,
+
+                            delete: true,
+                            delete_max_size: Some(10000),
+
+                            copy: true,
+
+                            list: true,
+                            list_with_recursive: true,
+
+                            presign: has_temp_url_key,
+                            presign_stat: has_temp_url_key,
+                            presign_read: has_temp_url_key,
+                            presign_write: has_temp_url_key,
+
+                            shared: true,
+
+                            ..Default::default()
+                        });
+                    am.into()
+                },
+                root,
+                endpoint,
+                container,
+                token,
+                temp_url_key,
+                temp_url_hash_algorithm,
+            }),
+        })
+    }
+}
+
+/// Backend for Swift service
+#[derive(Debug, Clone)]
+pub struct SwiftBackend {
+    core: Arc<SwiftCore>,
+}
+
+impl Access for SwiftBackend {
+    type Reader = HttpBody;
+    type Writer = oio::MultipartWriter<SwiftWriter>;
+    type Lister = oio::PageLister<SwiftLister>;
+    type Deleter = oio::BatchDeleter<SwiftDeleter>;
+
+    fn info(&self) -> Arc<AccessorInfo> {
+        self.core.info.clone()
+    }
+
+    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
+        let resp = self.core.swift_get_metadata(path, &args).await?;
+
+        match resp.status() {
+            StatusCode::OK | StatusCode::NO_CONTENT => {
+                let headers = resp.headers();
+                let mut meta = parse_into_metadata(path, headers)?;
+                let user_meta = parse_prefixed_headers(headers, "x-object-meta-");
+                if !user_meta.is_empty() {
+                    meta = meta.with_user_metadata(user_meta);
+                }
+
+                Ok(RpStat::new(meta))
+            }
+            _ => Err(parse_error(resp)),
+        }
+    }
+
+    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+        let resp = self.core.swift_read(path, args.range(), &args).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => Ok((RpRead::new(), resp.into_body())),
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)))
+            }
+        }
+    }
+
+    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+        let concurrent = args.concurrent();
+        let writer = SwiftWriter::new(self.core.clone(), args.clone(), path.to_string());
+        let w = oio::MultipartWriter::new(self.core.info.clone(), writer, concurrent);
+
+        Ok((RpWrite::default(), w))
+    }
+
+    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+        Ok((
+            RpDelete::default(),
+            oio::BatchDeleter::new(
+                SwiftDeleter::new(self.core.clone()),
+                self.core.info.full_capability().delete_max_size,
+            ),
+        ))
+    }
+
+    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+        let l = SwiftLister::new(
+            self.core.clone(),
+            path.to_string(),
+            args.recursive(),
+            args.limit(),
+        );
+
+        Ok((RpList::default(), oio::PageLister::new(l)))
+    }
+
+    async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+        let (expire, op) = args.into_parts();
+
+        let method = match &op {
+            PresignOperation::Stat(_) => http::Method::HEAD,
+            PresignOperation::Read(_) => http::Method::GET,
+            PresignOperation::Write(_) => http::Method::PUT,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "presign operation is not supported",
+                ));
+            }
+        };
+
+        let url = self.core.swift_temp_url(&method, path, expire)?;
+        let uri: http::Uri = url.parse().map_err(|e| {
+            Error::new(ErrorKind::Unexpected, "failed to parse presigned URL").set_source(e)
+        })?;
+
+        Ok(RpPresign::new(PresignedRequest::new(
+            method,
+            uri,
+            http::HeaderMap::new(),
+        )))
+    }
+
+    async fn copy(&self, from: &str, to: &str, _args: OpCopy) -> Result<RpCopy> {
+        // cannot copy objects larger than 5 GB.
+        // Reference: https://docs.openstack.org/api-ref/object-store/#copy-object
+        let resp = self.core.swift_copy(from, to).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::CREATED | StatusCode::OK => Ok(RpCopy::default()),
+            _ => Err(parse_error(resp)),
+        }
+    }
+}

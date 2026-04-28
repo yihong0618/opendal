@@ -16,6 +16,7 @@
 # under the License.
 
 import unittest
+from unittest.mock import patch
 
 from plan import plan
 
@@ -33,15 +34,24 @@ class BehaviorTestPlan(unittest.TestCase):
         self.assertTrue(result["components"]["core"])
 
     def test_core_services_fs(self):
-        result = plan(["core/src/services/fs/mod.rs"])
+        result = plan(["core/services/fs/src/lib.rs"])
         self.assertTrue(result["components"]["core"])
         self.assertTrue(len(result["core"]) > 0)
 
         cases = [v["service"] for v in result["core"][0]["cases"]]
-        # Should not contain fs
+        # Should contain fs
         self.assertTrue("fs" in cases)
         # Should not contain s3
         self.assertFalse("s3" in cases)
+
+    def test_core_services_hdfs_native_mapping(self):
+        result = plan(["core/services/hdfs-native/src/lib.rs"])
+        self.assertTrue(result["components"]["core"])
+        self.assertTrue(len(result["core"]) > 0)
+
+        cases = [v["service"] for v in result["core"][0]["cases"]]
+        self.assertTrue("hdfs_native" in cases)
+        self.assertFalse("fs" in cases)
 
     def test_binding_java(self):
         result = plan(["bindings/java/pom.xml"])
@@ -50,16 +60,37 @@ class BehaviorTestPlan(unittest.TestCase):
         self.assertTrue(result["components"]["binding_java"])
         self.assertTrue(len(result["binding_java"]) > 0)
 
+    def test_binding_java_excludes_hf(self):
+        result = plan(["bindings/java/pom.xml"])
+        cases = [v["service"] for target in result["binding_java"] for v in target["cases"]]
+        self.assertFalse("hf" in cases)
 
     def test_integration_object_store(self):
         result = plan(["integrations/object_store/Cargo.toml"])
         self.assertTrue(result["components"]["integration_object_store"])
         self.assertTrue(len(result["integration_object_store"]) > 0)
 
-        result = plan(["core/src/services/fs/mod.rs"])
+        result = plan(["core/services/fs/src/lib.rs"])
         cases = [v["service"] for v in result["integration_object_store"][0]["cases"]]
         # Should contain fs
         self.assertTrue("fs" in cases)
+
+    @patch.dict("os.environ", {"GITHUB_HAS_SECRETS": "true"}, clear=False)
+    def test_gdrive_is_temporarily_disabled(self):
+        result = plan([".github/workflows/test_behavior.yml"])
+
+        self.assertTrue(result["components"]["core"])
+        core_cases = [v["service"] for target in result["core"] for v in target["cases"]]
+        self.assertFalse("gdrive" in core_cases)
+
+        for language in ["java", "python", "nodejs", "go", "c", "cpp", "dotnet"]:
+            self.assertTrue(result["components"][f"binding_{language}"])
+            binding_cases = [
+                v["service"]
+                for target in result[f"binding_{language}"]
+                for v in target["cases"]
+            ]
+            self.assertFalse("gdrive" in binding_cases)
 
 
 if __name__ == "__main__":

@@ -33,16 +33,32 @@ on:
   workflow_dispatch:
 
 jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v6
+
+      - name: Setup OCaml toolchain
+        uses: ./.github/actions/setup-ocaml
+        with:
+          need-depext: true
+          need-pin: true
+
+      - name: Clippy Check
+        working-directory: "bindings/ocaml"
+        run: |
+          cargo clippy -- -D warnings
+
   test:
-    # Wait for https://github.com/ocaml/setup-ocaml/issues/872 fixes
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout PR
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Cache OPAM dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.opam
           key: ${{ runner.os }}-opam-${{ hashFiles('bindings/ocaml/dune-project') }}
@@ -56,16 +72,11 @@ jobs:
           need-depext: true
           need-pin: true
 
-      - name: Clippy Check
-        working-directory: "bindings/ocaml"
-        run: |
-          cargo clippy -- -D warnings
-
       - name: Checks
         run: |
           # make sure tests pass
           opam install -y dune ounit2 ocamlformat
           eval $(opam env)
           cd bindings/ocaml
-          dune runtest
           dune build @fmt
+          dune runtest
